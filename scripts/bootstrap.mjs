@@ -1,39 +1,34 @@
 #!/usr/bin/env node
 /**
- * 部署前置脚本：自动创建 D1 + KV 并把真实 ID 写回 wrangler.toml
+ * 本地手动初始化脚本：创建 D1 数据库 + KV 命名空间 + 初始化表结构
  *
- * 在 Cloudflare Workers Build (CI) 或本地首次部署时运行:
+ * 适用场景: 你想用本地命令行一次性创建好 Cloudflare 资源，而不是在 Dashboard
+ *           手动点界面。
+ *
+ * 前置条件:
+ *   - 已 wrangler login
+ *   - 或设置了 CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID 环境变量
+ *
+ * 用法:
  *   node scripts/bootstrap.mjs
  *
- * 之后再执行 wrangler deploy。
+ * 输出: 创建好的 D1 database_id 和 KV namespace id，你可以复制到 wrangler.toml
+ *       (如果选择用 wrangler.toml 绑定方式)
  *
- * 该脚本幂等：
- *   - 如果 wrangler.toml 中 ID 仍是占位符，就创建资源并替换
- *   - 如果 ID 已是真实值，跳过创建
- *
- * 在 CI 中需要设置环境变量:
- *   CLOUDFLARE_API_TOKEN  - Cloudflare API token (Workers Builds 默认提供)
- *   CLOUDFLARE_ACCOUNT_ID - Cloudflare 账户 ID (Workers Builds 默认提供)
+ * 注: 该脚本不会自动修改 wrangler.toml。本项目的部署推荐使用 Cloudflare
+ *     Dashboard 上的 Bindings 配置，无需修改 wrangler.toml。
  */
 
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const WRANGLER_TOML = join(__dirname, "..", "wrangler.toml");
-
-const PLACEHOLDER_D1 = "REPLACE_WITH_YOUR_D1_ID";
-const PLACEHOLDER_KV = "REPLACE_WITH_YOUR_KV_ID";
+const SCHEMA_SQL = join(__dirname, "..", "schema.sql");
 
 function log(msg) {
   console.log(`[bootstrap] ${msg}`);
-}
-
-function warn(msg) {
-  console.warn(`[bootstrap] ⚠️  ${msg}`);
 }
 
 function fail(msg) {
@@ -41,7 +36,6 @@ function fail(msg) {
   process.exit(1);
 }
 
-/** 执行 wrangler 命令，返回 stdout 字符串 */
 function wrangler(args) {
   const cmd = `npx wrangler ${args}`;
   log(`$ ${cmd}`);
@@ -52,150 +46,78 @@ function wrangler(args) {
   }).trim();
 }
 
-/** 解析 wrangler d1 create 的输出，提取 database_id */
-function parseD1CreateOutput(stdout) {
-  // 输出形如:
-  //   ✅ Successfully created DB 'nvr-key-db'
-  //   [[d1_databases]]
-  //   binding = "DB"
-  //   database_name = "nvr-key-db"
-  //   database_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-  const m = stdout.match(/database_id\s*=\s*"([^"]+)"/);
-  if (!m) throw new Error("无法从 wrangler d1 create 输出中解析 database_id");
-  return m[1];
-}
-
-/** 解析 wrangler kv namespace create 的输出，提取 id */
-function parseKvCreateOutput(stdout) {
-  // 输出形如:
-  //   ⛅️ wrangler 3.x
-  //   ...
-  //   [[kv_namespaces]]
-  //   binding = "SESSIONS"
-  //   id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  const m = stdout.match(/\bid\s*=\s*"([^"]+)"/);
-  if (!m) throw new Error("无法从 wrangler kv namespace create 输出中解析 id");
-  return m[1];
-}
-
-/** 列出已存在的 D1 数据库，返回 [{name, uuid}]；找不到时返回 [] */
 function listD1Databases() {
   try {
-    const out = wrangler("d1 list --json");
-    const arr = JSON.parse(out);
-    return Array.isArray(arr) ? arr : [];
+    return JSON.parse(wrangler("d1 list --json")) || [];
   } catch {
     return [];
   }
 }
 
-/** 列出已存在的 KV 命名空间，返回 [{id, title}] */
 function listKvNamespaces() {
   try {
-    const out = wrangler("kv namespace list --json");
-    const arr = JSON.parse(out);
-    return Array.isArray(arr) ? arr : [];
+    return JSON.parse(wrangler("kv namespace list --json")) || [];
   } catch {
     return [];
   }
 }
 
-/** 把 toml 中指定的占位符替换为真实 ID */
-function patchWranglerToml(replacements) {
-  let content = readFileSync(WRANGLER_TOML, "utf8");
-  for (const [placeholder, realId] of Object.entries(replacements)) {
-    if (!content.includes(placeholder)) {
-      log(`toml 中已不含占位符 ${placeholder}，跳过`);
-      continue;
-    }
-    content = content.split(placeholder).join(realId);
-    log(`替换 ${placeholder} -> ${realId}`);
-  }
-  writeFileSync(WRANGLER_TOML, content, "utf8");
+function parseId(stdout, key) {
+  const m = stdout.match(new RegExp(`${key}\\s*=\\s*"([^"]+)"`));
+  if (!m) throw new Error(`无法从输出中解析 ${key}`);
+  return m[1];
 }
 
 function main() {
   log(`开始 (cwd=${process.cwd()})`);
 
-  // 检查环境
-  if (!process.env.CLOUDFLARE_API_TOKEN && !process.env.CF_API_TOKEN) {
-    warn("未检测到 CLOUDFLARE_API_TOKEN / CF_API_TOKEN");
-    warn("如果是本地运行，请先 `wrangler login` 或设置环境变量");
+  // 1. D1
+  let d1Id;
+  const dbs = listD1Databases();
+  const existingDb = dbs.find((d) => d.name === "nvr-key-db");
+  if (existingDb) {
+    d1Id = existingDb.uuid;
+    log(`找到已存在的 D1: ${d1Id}`);
+  } else {
+    log("创建 D1 数据库 nvr-key-db ...");
+    const out = wrangler("d1 create nvr-key-db");
+    d1Id = parseId(out, "database_id");
+    log(`✅ 已创建 D1: ${d1Id}`);
   }
 
-  // 读当前 wrangler.toml
-  const toml = readFileSync(WRANGLER_TOML, "utf8");
-  const needsD1 = toml.includes(PLACEHOLDER_D1);
-  const needsKV = toml.includes(PLACEHOLDER_KV);
-
-  if (!needsD1 && !needsKV) {
-    log("wrangler.toml 中 D1 / KV ID 均已是真实值，无需 bootstrap");
-    return;
+  // 2. KV
+  let kvId;
+  const kvs = listKvNamespaces();
+  const existingKv = kvs.find((k) => k.title === "SESSIONS");
+  if (existingKv) {
+    kvId = existingKv.id;
+    log(`找到已存在的 KV: ${kvId}`);
+  } else {
+    log("创建 KV 命名空间 SESSIONS ...");
+    const out = wrangler("kv namespace create SESSIONS");
+    kvId = parseId(out, "id");
+    log(`✅ 已创建 KV: ${kvId}`);
   }
 
-  const replacements = {};
-
-  // ---- D1 ----
-  if (needsD1) {
-    log("需要创建或复用 D1 数据库 nvr-key-db ...");
-    let dbId = null;
-
-    // 先尝试找已存在的
-    const dbs = listD1Databases();
-    const existing = dbs.find((d) => d.name === "nvr-key-db");
-    if (existing) {
-      dbId = existing.uuid;
-      log(`找到已存在的 D1: ${dbId}`);
-    } else {
-      // 创建新的
-      try {
-        const out = wrangler("d1 create nvr-key-db");
-        dbId = parseD1CreateOutput(out);
-        log(`已创建 D1: ${dbId}`);
-      } catch (e) {
-        fail(`D1 创建失败: ${e.message}`);
-      }
-    }
-    replacements[PLACEHOLDER_D1] = dbId;
+  // 3. 初始化 D1 表结构
+  log("初始化 D1 表结构...");
+  try {
+    wrangler(`d1 execute nvr-key-db --remote --file=${SCHEMA_SQL}`);
+    log("✅ D1 表结构已就绪");
+  } catch (e) {
+    log(`⚠️  D1 表结构初始化跳过（可能已存在）: ${e.message}`);
   }
 
-  // ---- KV ----
-  if (needsKV) {
-    log("需要创建或复用 KV 命名空间 SESSIONS ...");
-    let kvId = null;
-
-    const kvs = listKvNamespaces();
-    const existingKv = kvs.find((k) => k.title === "SESSIONS");
-    if (existingKv) {
-      kvId = existingKv.id;
-      log(`找到已存在的 KV: ${kvId}`);
-    } else {
-      try {
-        const out = wrangler("kv namespace create SESSIONS");
-        kvId = parseKvCreateOutput(out);
-        log(`已创建 KV: ${kvId}`);
-      } catch (e) {
-        fail(`KV 创建失败: ${e.message}`);
-      }
-    }
-    replacements[PLACEHOLDER_KV] = kvId;
-  }
-
-  // ---- 写回 wrangler.toml ----
-  patchWranglerToml(replacements);
-
-  // ---- 初始化 D1 表结构（仅当刚创建 D1 时） ----
-  if (needsD1 && replacements[PLACEHOLDER_D1]) {
-    log("初始化 D1 表结构...");
-    try {
-      wrangler("d1 execute nvr-key-db --remote --file=./schema.sql");
-      log("✅ D1 表结构已就绪");
-    } catch (e) {
-      warn(`D1 表结构初始化失败（可能已存在）: ${e.message}`);
-    }
-  }
-
-  log("✅ bootstrap 完成");
+  console.log("\n===============================================");
+  console.log("✅ 资源创建完成。请记录以下 ID:");
+  console.log("===============================================");
+  console.log(`D1 database_id:  ${d1Id}`);
+  console.log(`KV namespace id: ${kvId}`);
+  console.log("");
+  console.log("如果你用 Cloudflare Dashboard 绑定方式，无需记这些 ID。");
+  console.log("如果你用 wrangler.toml 绑定方式，把它们填入 wrangler.toml:");
+  console.log(`  database_id = "${d1Id}"`);
+  console.log(`  id          = "${kvId}"`);
 }
 
 try {

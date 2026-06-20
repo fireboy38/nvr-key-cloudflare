@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "wrangler dev",
     "bootstrap": "node scripts/bootstrap.mjs",
-    "predeploy": "node scripts/bootstrap.mjs",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
     "db:init": "wrangler d1 execute nvr-key-db --local --file=./schema.sql",

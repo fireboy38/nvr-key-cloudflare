@@ -48,56 +48,90 @@ npm run dev
 
 ## 部署到 Cloudflare
 
-支持两种部署方式：
+支持两种方式：
 
-### 方式 1：Cloudflare Workers Build（推荐，CI 自动部署）
+### 方式 1：Cloudflare Workers Build + Dashboard 绑定（推荐，最稳）
 
-通过 GitHub 仓库连接 Cloudflare，每次 push 自动部署。
+#### 第 1 步：连接 GitHub 仓库
 
-**一次性设置**：
+在 Cloudflare Dashboard:
+- Workers & Pages → Create → Workers → Connect to Git
+- 选 `nvr-key-cloudflare` 仓库，分支 `main`
+- **Build command**: 留空（或填 `npm install`）
+- **Deploy command**: 保持默认 `npx wrangler deploy`（不需要改！）
+- 保存
 
-1. 在 Cloudflare Dashboard 进入 Workers & Pages → Create → Workers → Connect to Git
-2. 选择仓库 `nvr-key-cloudflare`，分支 `main`
-3. **Build command**: 留空（或填 `npm install`）
-4. **Deploy command**: `npm run deploy`（关键！会自动先跑 `bootstrap` 再 `wrangler deploy`）
-5. 保存并部署
+#### 第 2 步：在 Dashboard 创建并绑定 D1 + KV
 
-首次部署时，`scripts/bootstrap.mjs` 会：
-- 检测 `wrangler.toml` 中 D1/KV ID 是否还是占位符
-- 自动创建 `nvr-key-db` D1 数据库和 `SESSIONS` KV 命名空间
-- 把真实 ID 写回 `wrangler.toml`（**注意：脚本会修改 wrangler.toml，但不会 push 回仓库**）
-- 自动执行 `schema.sql` 初始化表结构
-- 之后才执行 `wrangler deploy`
+进入刚创建的 Worker（叫 `nvr-key-cloudflare`）→ **Settings → Bindings**：
 
-> ⚠️ Cloudflare Workers Build 默认会注入 `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID` 给 wrangler 使用，无需额外配置。
+**a) 添加 D1 数据库**:
+- 点 "Add binding" → 选 "D1 database"
+- Variable name: **`DB`**（必须完全一致）
+- 选 "Create new database"，名字填 `nvr-key-db`
+- 保存
 
-**部署后必须做的事**：
+**b) 添加 KV 命名空间**:
+- 点 "Add binding" → 选 "KV namespace"
+- Variable name: **`SESSIONS`**（必须完全一致）
+- 选 "Create new namespace"，名字填 `SESSIONS`
+- 保存
 
-到 Worker 的 Dashboard → Settings → Variables and Secrets → 添加：
-- 变量名: `KEYGEN_ADMIN_PASSWORD`
-- 值: 你的管理密码
-- 类型: **Secret**（加密）
+#### 第 3 步：初始化 D1 表结构
 
-### 方式 2：手动本地部署
+在 Cloudflare Dashboard:
+- Workers & Pages → D1 → 选 `nvr-key-db` → Console
+- 把 `schema.sql` 的内容粘贴进去执行
+
+或用本地命令（需要 `wrangler login`）:
+```bash
+npx wrangler d1 execute nvr-key-db --remote --file=./schema.sql
+```
+
+#### 第 4 步：设置管理密码
+
+进入 Worker → Settings → Variables and Secrets → Add variable:
+- Variable name: `KEYGEN_ADMIN_PASSWORD`
+- Value: 你的管理密码
+- Type: **Secret** (Encrypt)
+
+#### 第 5 步：重新部署
+
+在 Worker 的 Deployments 列表点 "Retry deployment"，或随便 `git push` 一个空 commit 触发:
+```bash
+git commit --allow-empty -m "trigger redeploy" && git push
+```
+
+部署成功后访问 `https://nvr-key-cloudflare.<你的子域>.workers.dev`。
+
+### 方式 2：本地手动部署（如果你更喜欢命令行）
 
 ```bash
 # 1. 安装依赖
 npm install
 
-# 2. 登录 Cloudflare（一次性）
+# 2. 登录 Cloudflare
 npx wrangler login
 
-# 3. 一键部署（会自动 bootstrap）
-npm run deploy
-```
+# 3. 用 bootstrap 脚本创建 D1 + KV 并初始化表结构
+#    （脚本会输出 database_id 和 kv namespace id）
+npm run bootstrap
 
-`npm run deploy` 会触发 `predeploy` 钩子自动跑 bootstrap.mjs，所以你不需要手动创建 D1/KV。
+# 4. 把上一步输出的两个 ID 填到 wrangler.toml 中，添加这两段:
+#    [[d1_databases]]
+#    binding = "DB"
+#    database_name = "nvr-key-db"
+#    database_id = "<填这里>"
+#
+#    [[kv_namespaces]]
+#    binding = "SESSIONS"
+#    id = "<填这里>"
 
-**设置管理密码**：
-
-```bash
+# 5. 设置管理密码
 npx wrangler secret put KEYGEN_ADMIN_PASSWORD
-# 按提示输入新密码
+
+# 6. 部署
+npm run deploy
 ```
 
 ### 后续查看日志
@@ -106,6 +140,12 @@ npx wrangler secret put KEYGEN_ADMIN_PASSWORD
 npm run tail
 # 或在 Cloudflare Dashboard → Worker → Logs 查看
 ```
+
+### 为什么不再用 `predeploy` 自动 bootstrap？
+
+之前我们尝试过用 npm `predeploy` 钩子自动 bootstrap，但 Cloudflare Workers Build 默认 deploy command 是 `npx wrangler deploy`（直接调 wrangler），不经过 npm run，钩子不触发。
+
+用 Dashboard 绑定方式是 Cloudflare 官方推荐做法，更直观、更稳定、不需要改 deploy command。
 
 ## 已验证的功能
 
