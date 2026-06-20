@@ -3,45 +3,25 @@ main = "src/index.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
-# 静态资源（HTML 页面）—— Cloudflare Workers Build 会自动上传
+# 静态资源（HTML 页面）
 [assets]
 directory = "./public"
 binding = "ASSETS"
 
-# ============================================================
-# D1 数据库 + KV 命名空间：通过 Cloudflare Dashboard 绑定
-# ============================================================
-#
-# 这里不声明 d1_databases / kv_namespaces，原因：
-#   1. 真实资源 ID 不应该提交到代码仓库
-#   2. Cloudflare Workers Build 控制台提供 Bindings 编辑界面，更直观
-#   3. 用 Dashboard 绑定后，wrangler deploy 会自动读取，无需改 wrangler.toml
-#
-# 在 Cloudflare Dashboard 中的操作步骤:
-#   1. 进入 Workers & Pages → 选 nvr-key-cloudflare Worker → Settings → Bindings
-#   2. 点 "Add binding" → 选 "D1 database"
-#        - Variable name: DB
-#        - D1 database:    新建 nvr-key-db 或选择已存在的
-#   3. 再次 "Add binding" → 选 "KV namespace"
-#        - Variable name: SESSIONS
-#        - KV namespace:   新建 SESSIONS 或选择已存在的
-#   4. 保存后重新触发部署
-#
-# 如果你坚持要在 wrangler.toml 里声明（不推荐）:
-#   [[d1_databases]]
-#   binding = "DB"
-#   database_name = "nvr-key-db"
-#   database_id = "<your_real_d1_id>"
-#
-#   [[kv_namespaces]]
-#   binding = "SESSIONS"
-#   id = "<your_real_kv_id>"
+# D1 数据库（已通过 API 创建并初始化表结构）
+[[d1_databases]]
+binding = "DB"
+database_name = "nvr-key-db"
+database_id = "72a1ce96-5e5f-45ec-9f02-02f96fabc844"
+
+# KV 命名空间（用于 session 存储，带 TTL 自动清理）
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "a92b33cce36f40b88a5c876bcb60c624"
 
 # 环境变量（非敏感）
 [vars]
 SESSION_TTL_SECONDS = "7200"
 
-# 注：管理密码不要写在这里！
-# 用以下命令设置（控制台或本地均可）:
-#   wrangler secret put KEYGEN_ADMIN_PASSWORD
-# 或在 Dashboard → Settings → Variables and Secrets 中添加
+# 注：管理密码 KEYGEN_ADMIN_PASSWORD 通过 Cloudflare Dashboard
+# 设置为 Secret，不写在此处
