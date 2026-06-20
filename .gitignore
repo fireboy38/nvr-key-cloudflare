@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Wrangler local state
+.wrangler/
+
+# Build output
+dist/
+build/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# 环境变量（含密钥时绝不能提交）
+.dev.vars
+.env
+.env.local
+
+# 日志
+*.log
+npm-debug.log*
